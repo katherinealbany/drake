@@ -15,7 +15,8 @@ $push    = ENV['push']    ||= 'true'
 
 ###################################################################################################
 
-$lock = '.lock'
+$lock_file  = "#{$dir}/.lock"
+$lock_count = 0
 
 ###################################################################################################
 
@@ -23,122 +24,148 @@ task :default => :build
 
 ###################################################################################################
 
-task :lock do
-  puts "#{$dir}/#{$lock}"
-  begin
-    file = File.stat($lock)
-    puts "#{file.pwd}"
-    puts 'Already Locked!'
-    exit 1
-  rescue
-    FileUtils.touch($lock)
-    puts 'Locked!'
-  end
-end
-
-# Implement a locking solution
-#
-#  begin
-#    raise "something's wrong here"
-#  rescue
-#    rollback()
-#    raise "error executing task"
-#  end
-
-###################################################################################################
-
 task :build, :pull, :cache do |task, args|
-  args.with_defaults(:pull => 'false')
-  args.with_defaults(:cache => 'true')
+  begin
+    lock
 
-  assert_not_empty $dir, 'dir'
-  assert_not_empty $repo, 'repo'
-  assert_not_empty $build, 'build'
+    args.with_defaults(:pull => 'false')
+    args.with_defaults(:cache => 'true')
 
-  $build_fqdn = "#{$repo}/#{resolve_image_name $dir}:#{$build}"
-  assert_not_empty $build_fqdn, 'build_fqdn'
+    assert_not_empty $dir, 'dir'
+    assert_not_empty $repo, 'repo'
+    assert_not_empty $build, 'build'
 
-  sh "docker build --pull=#{args[:pull]} --no-cache=#{to_no_cache args[:cache]} --tag=#{$build_fqdn} #{$dir}"
+    $build_fqdn = "#{$repo}/#{resolve_image_name $dir}:#{$build}"
+    assert_not_empty $build_fqdn, 'build_fqdn'
 
-  $build_id = get_image_id "#{$build_fqdn}"
-  assert_not_empty $build_id, 'build_id'
+    sh "docker build --pull=#{args[:pull]} --no-cache=#{to_no_cache args[:cache]} --tag=#{$build_fqdn} #{$dir}"
+
+    $build_id = get_image_id "#{$build_fqdn}"
+    assert_not_empty $build_id, 'build_id'
+
+    unlock
+  rescue
+    unlock
+  end
 end
 
 ###################################################################################################
 
 task :stable, :push do |task, args|
-  args.with_defaults(:push => "#{$push}")
+  begin
+    lock
 
-  assert_not_empty $dir, 'dir'
-  assert_not_empty $repo, 'repo'
-  assert_not_empty $stable, 'stable'
+    args.with_defaults(:push => "#{$push}")
 
-  $stable_fqdn = "#{$repo}/#{resolve_image_name $dir}:#{$stable}"
-  assert_not_empty $stable_fqdn, 'stable_fqdn'
+    assert_not_empty $dir, 'dir'
+    assert_not_empty $repo, 'repo'
+    assert_not_empty $stable, 'stable'
 
-  Rake::Task['build'].invoke 'true', 'false'
+    $stable_fqdn = "#{$repo}/#{resolve_image_name $dir}:#{$stable}"
+    assert_not_empty $stable_fqdn, 'stable_fqdn'
 
-  tag_image $build_fqdn, $stable_fqdn
+    Rake::Task['build'].invoke 'true', 'false'
 
-  $stable_id = get_image_id "#{$stable_fqdn}"
-  assert_not_empty $stable_id, 'stable_id'
+    tag_image $build_fqdn, $stable_fqdn
 
-  if "#{$build_id}" != "#{$stable_id}"
-    puts "Image identity mismatch!"
-    exit 1
-  end
+    $stable_id = get_image_id "#{$stable_fqdn}"
+    assert_not_empty $stable_id, 'stable_id'
 
-  if "#{args[:push]}" == 'true'
-    push_image "#{$build_fqdn}"
-    push_image "#{$stable_fqdn}"
-  end
+    if "#{$build_id}" != "#{$stable_id}"
+      puts "Image identity mismatch!"
+      raise
+    end
 
-  if "#{$build_id}" != "#{$stable_id}"
-    puts "Image identity mismatch after push!"
-    exit 1
+    if "#{args[:push]}" == 'true'
+      push_image "#{$build_fqdn}"
+      push_image "#{$stable_fqdn}"
+    end
+
+    if "#{$build_id}" != "#{$stable_id}"
+      puts "Image identity mismatch after push!"
+      raise
+    end
+
+    unlock
+  rescue
+    unlock
   end
 end
 
 ###################################################################################################
 
 task :release do
-  assert_not_empty $dir, 'dir'
-  assert_not_empty $repo, 'repo'
-  assert_not_empty $release, 'release'
+  begin
+    lock
 
-  $release_fqdn = "#{$repo}/#{resolve_image_name $dir}:#{$release}"
-  assert_not_empty $release_fqdn, 'release_fqdn'
+    assert_not_empty $dir, 'dir'
+    assert_not_empty $repo, 'repo'
+    assert_not_empty $release, 'release'
 
-  if "#{$force}" != 'true'
-    sh "docker pull #{$release_fqdn}" do |exists, result|
-      if exists
-        puts "#{$release_fqdn} already released"
-        exit 1
+    $release_fqdn = "#{$repo}/#{resolve_image_name $dir}:#{$release}"
+    assert_not_empty $release_fqdn, 'release_fqdn'
+
+    if "#{$force}" != 'true'
+      sh "docker pull #{$release_fqdn}" do |exists, result|
+        if exists
+          puts "#{$release_fqdn} already released"
+          raise
+        end
       end
     end
+
+    Rake::Task['stable'].invoke 'false'
+
+    tag_image $stable_fqdn, $release_fqdn
+
+    $release_id = get_image_id "#{$release_fqdn}"
+    assert_not_empty $release_id, 'release_id'
+
+    if "#{$build_id}" != "#{$stable_id}" || "#{$build_id}" != "#{$release_id}"
+      puts "Image identity mismatch!"
+      raise
+    end
+
+    if "#{$push}" == 'true'
+      push_image "#{$build_fqdn}"
+      push_image "#{$stable_fqdn}"
+      push_image "#{$release_fqdn}"
+    end
+
+    if "#{$build_id}" != "#{$stable_id}" || "#{$build_id}" != "#{$release_id}"
+      puts "Image identity mismatch after push!"
+      raise
+    end
+
+    unlock
+  rescue
+    unlock
   end
+end
 
-  Rake::Task['stable'].invoke 'false'
+###################################################################################################
 
-  tag_image $stable_fqdn, $release_fqdn
-
-  $release_id = get_image_id "#{$release_fqdn}"
-  assert_not_empty $release_id, 'release_id'
-
-  if "#{$build_id}" != "#{$stable_id}" || "#{$build_id}" != "#{$release_id}"
-    puts "Image identity mismatch!"
+def lock
+  if File.exist?("#{$lock_file}") and $lock_count == 0
+    puts "Already locked!"
     exit 1
+  else
+    FileUtils.touch($lock_file)
+    $lock_count = $lock_count + 1
+    puts "Locked: #{$lock_count}"
   end
+end
 
-  if "#{$push}" == 'true'
-    push_image "#{$build_fqdn}"
-    push_image "#{$stable_fqdn}"
-    push_image "#{$release_fqdn}"
-  end
+###################################################################################################
 
-  if "#{$build_id}" != "#{$stable_id}" || "#{$build_id}" != "#{$release_id}"
-    puts "Image identity mismatch after push!"
-    exit 1
+def unlock
+  if File.exist?("#{$lock_file}") and $lock_count > 0
+    $lock_count = $lock_count - 1
+    puts "Unlocked: #{$lock_count}"
+
+    if $lock_count == 0
+      FileUtils.remove($lock_file)
+    end
   end
 end
 
@@ -172,7 +199,7 @@ end
 def assert_not_empty (value, name)
   if "#{value}".empty?
     puts "#{name}: must not be null"
-    exit 1
+    raise
   end
 end
 
