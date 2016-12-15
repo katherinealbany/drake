@@ -226,7 +226,7 @@ end
 def tag_image (src, dest)
   assert_not_empty src, 'src'
   assert_not_empty dest, 'dest'
-  sh "docker tag -f #{src} #{dest}"
+  sh "docker tag #{src} #{dest}"
 end
 
 ###################################################################################################
